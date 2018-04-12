@@ -98,9 +98,9 @@ __csfx__ int csfx_watch_files(csfx_filetime_t* files, int count);
 /* Define dynamic library loading API */
 #if defined(_MSC_VER)
 # include <Windows.h>
-# define csfx__dl_load(path)   LoadLibrary(path)
-# define csfx__dl_free(lib)    FreeLibrary(lib)
-# define csfx__dl_symbol(l, n) GetProcAddress(l, n)
+# define csfx__dl_load(path)   (void*)LoadLibraryA(path)
+# define csfx__dl_free(lib)    FreeLibrary((HMODULE)lib)
+# define csfx__dl_symbol(l, n) GetProcAddress((HMODULE)l, n)
 
 static const char* csfx__dl_errmsg(void)
 {
