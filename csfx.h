@@ -32,11 +32,11 @@ enum
  */
 typedef struct
 {
-    int         version;
     long        libtime;
     void*       library;
-    const char* filepath;
     void*       userdata;
+    const char* filepath;
+    const char* temppath;
 } csfx_script_t;
 
 typedef struct
@@ -95,6 +95,9 @@ __csfx__ int csfx_watch_files(csfx_filetime_t* files, int count);
 
 #ifdef CSFX_IMPL
 
+#include <stdio.h>
+#include <stdlib.h>
+
 /* Define dynamic library loading API */
 #if defined(_MSC_VER)
 # include <Windows.h>
@@ -145,6 +148,28 @@ static long csfx__last_modify_time(const char* path)
 
     return (long)(time.QuadPart / 10000000 - 11644473600LL);
 }
+
+static const char* csfx__get_temp_path(void)
+{
+    char path[MAX_PATH];
+    char* tmp = (char*)malloc(MAX_PATH);
+    
+    GetTempPathA(MAX_PATH, path);
+    GetTempFileNameA(path, "__csfx_temp_", 0, tmp);
+    return tmp;
+}
+
+static int csfx__copy_file(const char* from_path, const char* to_path)
+{
+    if (CopyFileA(from_path, to_path, FALSE))
+    {
+	return 1;
+    }
+    else
+    {
+	return 0;
+    }
+}
 #elif defined(__unix__)
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -159,9 +184,33 @@ static long csfx__last_modify_time(const char* path)
 
     return (long)st.st_mtime;
 }
+
+static const char* csfx__get_temp_path(void)
+{
+    return tmpnam(NULL);
+}
+
+static int csfx__copy_file(const char* from_path, const char* to_path)
+{
+    char scmd[3 * PATH_MAX]; /* 2 path and command */
+    sprintf(scmd, "\\cp -fR %s %s", from_path, to_path);
+    if (system(scmd) != 0)
+    {
+	return 0;
+    }
+    else
+    {
+	return 1;
+    }
+}
 #else
 #error "Unsupported platform"
 #endif
+
+static int csfx__remove_file(const char* path)
+{
+    return remove(path);
+}
 
 typedef void* (*csfx_main_f)(void* userdata, int state);
 
@@ -192,15 +241,16 @@ static int csfx__file_changed(csfx_filetime_t* ft)
 
 void csfx_script_init(csfx_script_t* script, const char* path)
 {
-    script->version  = 0;
     script->libtime  = 0;
     script->library  = NULL;
-    script->filepath = path;
     script->userdata = NULL;
+    script->filepath = path;
+    script->temppath = csfx__get_temp_path();
 }
 
 void csfx_script_free(csfx_script_t* script)
 {
+    /* Raise quit event */
     if (script->library)
     {
 	void* library;
@@ -213,11 +263,18 @@ void csfx_script_free(csfx_script_t* script)
 	    script->userdata = main(script->userdata, CSFX_QUIT);
 	}
 	csfx__dl_free(library);
+
+	/* Remove temp */
+	csfx__remove_file(script->tempfile);
     }
 
-    script->version = 0;
-    script->libtime = 0;
-    script->library = NULL;
+    /* Return back temppath to the system */
+    free((void*)script->temppath);
+
+    script->libtime  = 0;
+    script->library  = NULL;
+    script->temppath = NULL;
+    script->filepath = NULL;
 }
 
 int csfx_script_update(csfx_script_t* script)
@@ -227,25 +284,43 @@ int csfx_script_update(csfx_script_t* script)
 	int state;
 	void* library;
 	csfx_main_f main;
+	char scmd[1024];
 
+	/* Intialize state */
+	state = CSFX_FAILED;
+	
 	/* Unload old version */
 	library = script->library;
 	if (library)
 	{
-	    main = (csfx_main_f)csfx__dl_symbol(library, csfx_main_name);
+	    /* Raise unload event */
+	    state = CSFX_UNLOAD;
+	    main  = (csfx_main_f)csfx__dl_symbol(library, csfx_main_name);
 	    if (main)
 	    {
-		script->userdata = main(script->userdata, CSFX_UNLOAD);
+		script->userdata = main(script->userdata, state);
 	    }
+
+	    /* Collect garbage */
 	    csfx__dl_free(library);
+	    script->library = NULL;
+	    
+	    /* Remove temp library */
+	    csfx__remove_file(script->temppath); /* Ignore error code */
+	}
+
+	/* Create new temp version */
+	if (!csfx__copy_file(script->filepath, script->temppath))
+	{
+	    /* Ensure copy file always success */
+	    abort();
 	}
 
 	/* Load new version */
-	state   = CSFX_FAILED;
-	library = csfx__dl_load(script->filepath); 
+	library = csfx__dl_load(script->temppath); 
 	if (library)
 	{
-	    state = !script->library ? CSFX_INIT : CSFX_RELOAD;
+	    state = state != CSFX_UNLOAD ? CSFX_INIT : CSFX_RELOAD;
 	    main  = (csfx_main_f)csfx__dl_symbol(library, csfx_main_name);
 	    if (main)
 	    {
@@ -253,11 +328,10 @@ int csfx_script_update(csfx_script_t* script)
 	    }
 	
 	    script->library = library;
-	    script->version = script->version + 1;
 	    script->libtime = csfx__last_modify_time(script->filepath);
 	}
 
-	return state;
+	return state == CSFX_UNLOAD ? CSFX_FAILED : state;
     }
     
     return CSFX_NONE;
