@@ -6,11 +6,12 @@
 #ifndef __CSFX_H__
 #define __CSFX_H__
 
-
+/** CSFX API attribute **/
 #ifndef __csfx__
 #define __csfx__
 #endif
 
+/** CSFX script function attribute **/
 #if defined(_MSC_VER) || defined(__MINGW32__) || defined(__CYGWIN__)
 # define __csfx_call__ __declspec(dllexport)
 #else
@@ -28,7 +29,7 @@ enum
 };
 
 /** 
- *
+ * Script data structure
  */
 typedef struct
 {
@@ -39,6 +40,9 @@ typedef struct
     const char* temppath;
 } csfx_script_t;
 
+/** 
+ * A file time data for watching file changed
+ */
 typedef struct
 {
     long        time;
