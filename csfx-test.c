@@ -42,10 +42,12 @@ int main(int argc, char* argv[])
 	/* Reload module if has a newer library version */
 	switch (csfx_script_update(&script))
 	{
+#if UNUSED_CODE
 	case CSFX_FAILED:
 	    fprintf(stderr, "Error: Library is failed to load\n");
 	    fprintf(stderr, "       %s", csfx_script_errmsg(&script));
 	    break;
+#endif
 
 	case CSFX_NONE:
 	case CSFX_INIT:

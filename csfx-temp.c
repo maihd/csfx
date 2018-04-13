@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include "csfx.h"
 
-__csfx_call__
 void* csfx_main(void* userdata, int state)
 {
     switch (state)
