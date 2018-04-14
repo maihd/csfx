@@ -22,7 +22,7 @@ CSFX_EXTERN_C;
 /* BEGIN EXTERN "C" */
 
 /**
- * CSFX loading state
+ * CSFX script state
  */
 enum
 {
@@ -34,6 +34,9 @@ enum
     CSFX_FAILED,
 };
 
+/**
+ * CSFX script error code
+ */
 enum
 {
     CSFX_ERROR_NONE,
@@ -44,7 +47,7 @@ enum
 };
 
 /** 
- *
+ * Script data structure
  */
 typedef struct
 {
@@ -57,6 +60,9 @@ typedef struct
     const char* temppath;
 } csfx_script_t;
 
+/**
+ * File data structure
+ */
 typedef struct
 {
     long        time;
@@ -101,12 +107,14 @@ __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
 #else
 # include <signal.h>
 # include <setjmp.h>
-# define csfx_try(s)				\
-    (s)->errcode = sigsetjmp(csfx__jmpenv, 0);	\
-    if (!(s)->errcode)
+# define csfx_try(s)						\
+    (s)->errcode = sigsetjmp(csfx__jmpenv, CSFX_ERROR_NONE);	\
+    if ((s)->errcode == CSFX_ERROR_NONE)
 
-# define csfx_except(s) else if ((s)->errcode <= CSFX_ERROR_MEMORY)
-# define csfx_finally   else 
+# define csfx_except(s) else if (csfx__errcode_filter(s))
+# define csfx_finally   else
+# define csfx__errcode_filter(s)					\
+    (s)->errcode > CSFX_ERROR_NONE && (s)->errcode <= CSFX_ERROR_MEMORY
 
 extern sigjmp_buf csfx__jmpenv; 
 #endif
@@ -215,22 +223,43 @@ static int csfx__copy_file(const char* from_path, const char* to_path)
 
 int csfx__seh_filter(csfx_script_t* script, unsigned long code)
 {
-    (void)script;
+    int errcode = CSFX_ERROR_NONE;
     
     switch (code)
     {
     case EXCEPTION_ACCESS_VIOLATION:
+	errcode = CSFX_ERROR_MEMORY;
+	break;
+	
     case EXCEPTION_ILLEGAL_INSTRUCTION:
+	errcode = CSFX_ERROR_INSTR;
+	break;
+	
     case EXCEPTION_DATATYPE_MISALIGNMENT:
+	errcode = CSFX_ERROR_ALIGN;
+	break;
+	
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+	errcode = CSFX_ERROR_MEMORY;
+	break;
+	
     case EXCEPTION_STACK_OVERFLOW:
-	return EXCEPTION_EXECUTE_HANDLER;
+	errcode = CSFX_ERROR_MEMORY;
+	break;
 
     default:
 	break;
     }
 
-    return EXCEPTION_CONTINUE_SEARCH;
+    script->errcode = errcode;
+    if (errcode == CSFX_ERROR_NONE)
+    {
+	return EXCEPTION_CONTINUE_SEARCH;
+    }
+    else
+    {
+	return EXCEPTION_EXECUTE_HANDLER;
+    }
 }
 
 static int csfx__remove_file(const char* path);
@@ -249,12 +278,7 @@ static int csfx__unlock_pdb_file(const char* dllpath)
     sprintf_s(path, CSFX__PATH_LENGTH, "%s%s%s.pdb", drive, dir, name);
 
     sprintf_s(scmd, CSFX__PATH_LENGTH, "del /Q %s", path);
-    //HANDLE file = CreateFileA("canvas_script.dll", GENERIC_READ, FILE_SHARE_DELETE,
-    //		      NULL, OPEN_EXISTING,
-//			      FILE_FLAG_DELETE_ON_CLOSE, NULL);
-    //  CloseHandle(file);
     return system(scmd);
-    //return 0;
 }
 
 
