@@ -31,6 +31,16 @@ enum
     CSFX_QUIT,
     CSFX_UNLOAD,
     CSFX_RELOAD,
+    CSFX_FAILED,
+};
+
+enum
+{
+    CSFX_ERROR_NONE,
+    CSFX_ERROR_ABORT,
+    CSFX_ERROR_ALIGN,
+    CSFX_ERROR_INSTR,
+    CSFX_ERROR_MEMORY,
 };
 
 /** 
@@ -39,6 +49,7 @@ enum
 typedef struct
 {
     int         state;
+    int         errcode;
     long        libtime;
     void*       library;
     void*       userdata;
@@ -53,6 +64,9 @@ typedef struct
 } csfx_filetime_t;
 
 /** Hot reload library API **/
+
+__csfx__ void  csfx_init(void);
+__csfx__ void  csfx_quit(void);
 
 /**
  * Initialize script
@@ -80,13 +94,21 @@ __csfx__ void* csfx_script_symbol(csfx_script_t* script, const char* name);
 __csfx__ const char* csfx_script_errmsg(csfx_script_t* script);
 
 #if defined(_MSC_VER)
-# define csfx_try(s)   __try
-# define csfx_catch(s) __except(csfx__seh_filter(s, GetExceptionCode()))
-
+# define csfx_try(s)    __try
+# define csfx_except(s) __except(csfx__seh_filter(s, GetExceptionCode()))
+# define csfx_finally   __finally
 __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
 #else
-# define csfx_try(s)   if (1)
-# define csfx_catch(s) else
+# include <signal.h>
+# include <setjmp.h>
+# define csfx_try(s)				\
+    (s)->errcode = sigsetjmp(csfx__jmpenv, 0);	\
+    if (!(s)->errcode)
+
+# define csfx_except(s) else if ((s)->errcode <= CSFX_ERROR_MEMORY)
+# define csfx_finally   else 
+
+extern sigjmp_buf csfx__jmpenv; 
 #endif
 
 /**
@@ -161,7 +183,6 @@ static const char* csfx__dlib_errmsg(void)
 
 /** Custom helper functions **/
 #if defined(_MSC_VER)
-# include <RestartManager.h>
 
 # define CSFX__PATH_LENGTH MAX_PATH
 
@@ -236,10 +257,23 @@ static int csfx__unlock_pdb_file(const char* dllpath)
     //return 0;
 }
 
+
+void csfx_init(void)
+{
+    /* NULL */
+}
+
+void csfx_quit(void)
+{
+    /* NULL */
+}
+
 #elif defined(__unix__)
-#include <sys/stat.h>
-#include <sys/types.h>
+# include <sys/stat.h>
+# include <sys/types.h>
 # define CSFX__PATH_LENGTH PATH_MAX
+
+sigjmp_buf csfx__jmpenv;
 
 static long csfx__last_modify_time(const char* path)
 {
@@ -265,6 +299,59 @@ static int csfx__copy_file(const char* from_path, const char* to_path)
     {
 	return 1;
     }
+}
+
+static void csfx__sighandler(int code, siginfo_t* info, void* context)
+{
+    int errcode;
+    switch (code)
+    {
+    case SIGILL:
+	errcode = CSFX_ERROR_INSTR;
+	break;
+
+    case SIGBUS:
+	errcode = CSFX_ERROR_ALIGN;
+	break;
+
+    case SIGABRT:
+	errcode = CSFX_ERROR_ABORT;
+	break;
+
+    case SIGSEGV:
+	errcode = CSFX_ERROR_MEMORY;
+	break;
+	
+    default:
+	errcode = CSFX_ERROR_NONE;
+	break;
+    }
+    siglongjmp(csfx__jmpenv, errcode);
+}
+
+
+void csfx_init(void)
+{
+    struct sigaction sa;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags     = SA_SIGINFO;
+    sa.sa_handler   = NULL;
+    sa.sa_sigaction = csfx__sighandler;
+
+    int idx;
+    int signals[] = { SIGBUS, SIGILL, SIGSEGV, SIGABRT };
+    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
+    {
+	if (sigaction(signals[idx], &sa, NULL) != 0)
+	{
+	    break;
+	}
+    }
+}
+
+void csfx_quit(void)
+{
+    
 }
 #else
 #error "Unsupported platform"
@@ -339,7 +426,7 @@ static int csfx__call_main(csfx_script_t* script, void* library, int state)
 	{
 	    script->userdata = main(script->userdata, state);
 	}
-	csfx_catch (script)
+	csfx_except (script)
 	{
 	    return -1;
 	}
@@ -399,12 +486,16 @@ int csfx_script_update(csfx_script_t* script)
 	    /* Collect garbage */
 	    csfx__dlib_free(library);
 	    script->library = NULL;
-	    
-	    /* Remove temp library */
-	    csfx__remove_file(script->temppath); /* Ignore error code */
+
+	    if (script->errcode != CSFX_ERROR_NONE)
+	    {
+		script->state = CSFX_FAILED;
+		return script->state;
+	    }
 	}
 
 	/* Create and load new temp version */
+	csfx__remove_file(script->temppath); /* Remove temp library */
 	if (csfx__copy_file(script->filepath, script->temppath))
 	{
 	    library = csfx__dlib_load(script->temppath); 
@@ -421,7 +512,17 @@ int csfx_script_update(csfx_script_t* script)
 		csfx__unlock_pdb_file(script->filepath);
 		#endif
 
-		script->state = state;
+		if (script->errcode != CSFX_ERROR_NONE)
+		{
+		    csfx__dlib_free(script->library);
+		    
+		    script->state = CSFX_FAILED;
+		    script->library = NULL;
+		}
+		else
+		{
+		    script->state = state;
+		}
 	    }
 	}
     }

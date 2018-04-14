@@ -12,6 +12,8 @@ int main(int argc, char* argv[])
 #else
     const char* libname = "./csfx-temp.dll";
 #endif
+
+    csfx_init();
     
     csfx_script_t script;
     csfx_script_init(&script, libname);
@@ -42,16 +44,15 @@ int main(int argc, char* argv[])
 	/* Reload module if has a newer library version */
 	switch (csfx_script_update(&script))
 	{
-#if UNUSED_CODE
 	case CSFX_FAILED:
 	    fprintf(stderr, "Error: Library is failed to load\n");
-	    fprintf(stderr, "       %s", csfx_script_errmsg(&script));
+	    fprintf(stderr, "       %s\n", csfx_script_errmsg(&script));
 	    break;
-#endif
 
 	case CSFX_NONE:
 	case CSFX_INIT:
 	case CSFX_RELOAD:
+	case CSFX_UNLOAD:
 	    break;
 	    
 	default:
@@ -64,5 +65,6 @@ int main(int argc, char* argv[])
     }
 
     csfx_script_free(&script);
+    csfx_quit();
     return 0;
 }

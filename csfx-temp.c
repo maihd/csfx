@@ -3,6 +3,8 @@
 
 void* csfx_main(void* userdata, int state)
 {
+    int* ptr = NULL;
+
     switch (state)
     {
     case CSFX_INIT:
@@ -15,6 +17,7 @@ void* csfx_main(void* userdata, int state)
 
     case CSFX_RELOAD:
 	printf("Script is reload\n");
+	//*ptr = 0; /* Make an segv signal */
 	break;
 
     case CSFX_UNLOAD:
