@@ -104,7 +104,7 @@ __csfx__ const char* csfx_script_errmsg(csfx_script_t* script);
 # define csfx_except(s) __except(csfx__seh_filter(s, GetExceptionCode()))
 # define csfx_finally   __finally
 __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
-#else
+#elif (__unix__) && !defined(__MINGW32__)
 # include <signal.h>
 # include <setjmp.h>
 # define csfx_try(s)						\
@@ -116,7 +116,13 @@ __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
 # define csfx__errcode_filter(s)					\
     (s)->errcode > CSFX_ERROR_NONE && (s)->errcode <= CSFX_ERROR_MEMORY
 
-extern sigjmp_buf csfx__jmpenv; 
+extern __thread sigjmp_buf csfx__jmpenv;
+#else
+# define csfx_try(s)    if (((s)->errcode = CSFX_ERROR_NONE) || 1)
+# define csfx_except(s) else if (csfx__errcode_filter(s))
+# define csfx_finally   else
+# define csfx__errcode_filter(s)					\
+    (s)->errcode > CSFX_ERROR_NONE && (s)->errcode <= CSFX_ERROR_MEMORY
 #endif
 
 /**
@@ -155,7 +161,7 @@ void* csfx_main(void* userdata, int state);
 #include <stdlib.h>
 
 /* Define dynamic library loading API */
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
 # include <Windows.h>
 # define csfx__dlib_load(path)   (void*)LoadLibraryA(path)
 # define csfx__dlib_free(lib)    FreeLibrary((HMODULE)lib)
@@ -190,7 +196,7 @@ static const char* csfx__dlib_errmsg(void)
 
 
 /** Custom helper functions **/
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
 
 # define CSFX__PATH_LENGTH MAX_PATH
 
@@ -265,6 +271,7 @@ int csfx__seh_filter(csfx_script_t* script, unsigned long code)
 static int csfx__remove_file(const char* path);
 static char* csfx__get_temp_path(const char* path);
 
+#if defined(_MSC_VER)
 static int csfx__unlock_pdb_file(const char* dllpath)
 {
     char drive[12];
@@ -280,7 +287,7 @@ static int csfx__unlock_pdb_file(const char* dllpath)
     sprintf_s(scmd, CSFX__PATH_LENGTH, "del /Q %s", path);
     return system(scmd);
 }
-
+#endif
 
 void csfx_init(void)
 {
@@ -297,7 +304,7 @@ void csfx_quit(void)
 # include <sys/types.h>
 # define CSFX__PATH_LENGTH PATH_MAX
 
-sigjmp_buf csfx__jmpenv;
+__thread sigjmp_buf csfx__jmpenv;
 
 static long csfx__last_modify_time(const char* path)
 {
@@ -442,13 +449,13 @@ static int csfx__call_main(csfx_script_t* script, void* library, int state)
     typedef void* (*csfx_main_f)(void*, int);
 
     const char* name = "csfx_main";
-    csfx_main_f main = (csfx_main_f)csfx__dlib_symbol(library, name);
+    csfx_main_f func = (csfx_main_f)csfx__dlib_symbol(library, name);
 
-    if (main)
+    if (func)
     {
 	csfx_try (script)
 	{
-	    script->userdata = main(script->userdata, state);
+	    script->userdata = func(script->userdata, state);
 	}
 	csfx_except (script)
 	{
@@ -516,6 +523,10 @@ int csfx_script_update(csfx_script_t* script)
 		script->state = CSFX_FAILED;
 		return script->state;
 	    }
+	    else
+	    {
+		return script->state;
+	    }
 	}
 
 	/* Create and load new temp version */
@@ -525,7 +536,7 @@ int csfx_script_update(csfx_script_t* script)
 	    library = csfx__dlib_load(script->temppath); 
 	    if (library)
 	    {
-		int state = script->state; /* next state */
+		int state = script->state; /* new state */
 		state = state != CSFX_UNLOAD ? CSFX_INIT : CSFX_RELOAD;
 		csfx__call_main(script, library, state);
 
