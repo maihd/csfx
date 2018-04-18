@@ -168,7 +168,13 @@ void* csfx_main(void* userdata, int old_state, int new_state);
 /* ----------------- CSFX_IMPL ----------------- */
 /* --------------------------------------------- */
 
+#ifdef CSFX_IMPL_WITH_PDB_UNLOCK
+# define CSFX_IMPL
+# define CSFX_PDB_UNLOCK
+#endif
+
 #ifdef CSFX_IMPL
+/* BEGIN OF CSFX_IMPL */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -284,22 +290,204 @@ int csfx__seh_filter(csfx_script_t* script, unsigned long code)
 static int csfx__remove_file(const char* path);
 static char* csfx__get_temp_path(const char* path);
 
-# ifdef _MSC_VER
-static int csfx__unlock_pdb_file(const char* dllpath)
-{
-    char drive[12];
-    char dir[CSFX__PATH_LENGTH];
-    char name[CSFX__PATH_LENGTH];
-    char path[CSFX__PATH_LENGTH];
-    char scmd[CSFX__PATH_LENGTH];
-    
-    GetFullPathNameA(dllpath, sizeof(path), path, NULL);
-    _splitpath(path, drive, dir, name, NULL);
-    sprintf_s(path, CSFX__PATH_LENGTH, "%s%s%s.pdb", drive, dir, name);
+# if defined(_MSC_VER)
 
-    sprintf_s(scmd, CSFX__PATH_LENGTH, "del /Q %s", path);
-    return system(scmd);
+#  if defined(CSFX_PDB_UNLOCK)
+#   include <winternl.h>
+#   include <RestartManager.h> 
+#   pragma comment(lib, "ntdll.lib")
+#   pragma comment(lib, "rstrtmgr.lib")
+
+#   define NTSTATUS_SUCCESS              ((NTSTATUS)0x00000000L)
+#   define NTSTATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xc0000004L)
+
+// Undocumented SYSTEM_INFORMATION_CLASS: SystemHandleInformation
+#   define SystemHandleInformation ((SYSTEM_INFORMATION_CLASS)16)
+
+typedef struct
+{
+    ULONG       ProcessId;
+    BYTE        ObjectTypeNumber;
+    BYTE        Flags;
+    USHORT      Value;
+    PVOID       Address;
+    ACCESS_MASK GrantedAccess;
+} SYSTEM_HANDLE;
+
+typedef struct
+{
+    ULONG         HandleCount;
+    SYSTEM_HANDLE Handles[1];
+} SYSTEM_HANDLE_INFORMATION;
+
+typedef struct
+{
+    UNICODE_STRING Name;
+} OBJECT_INFORMATION;
+
+static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATION* sys_info, ULONG sys_info_size, ULONG pid, const WCHAR* file)
+{ 
+    HANDLE hCurProcess = GetCurrentProcess();
+    HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess)
+    {
+        return;
+    }
+
+    int i;
+    int handles = 0;
+    for (i = 0; i < sys_info->HandleCount; i++)
+    {
+        SYSTEM_HANDLE* handle_info = &sys_info->Handles[i];
+        HANDLE         handle      = (HANDLE)handle_info->Value;      
+
+        if (handle_info->ProcessId == pid)
+        {
+            handles++;
+
+            HANDLE hCopy; // Duplicate the handle in the current process
+            if (!DuplicateHandle(hProcess, handle, hCurProcess, &hCopy, MAXIMUM_ALLOWED, FALSE, 0))
+            {
+                continue;
+            }
+
+            ULONG ObjectInformationLength = sizeof(OBJECT_INFORMATION) + 512;
+            OBJECT_INFORMATION* pobj = (OBJECT_INFORMATION*)HeapAlloc(heap, 0, ObjectInformationLength);
+
+            if (pobj == NULL)
+            {
+                continue;
+            }
+
+            ULONG ReturnLength;
+            if (NtQueryObject(hCopy, (OBJECT_INFORMATION_CLASS)1, pobj, ObjectInformationLength, &ReturnLength) != NTSTATUS_SUCCESS)
+            {
+                HeapFree(heap, 0, pobj); 
+                continue;
+            }                  
+
+            const WCHAR prefix[] = L"\\Device\\HarddiskVolume";
+            const ULONG prefix_length = sizeof(prefix) / sizeof(prefix[0]) - 1;
+            if (pobj->Name.Buffer && wcsncmp(pobj->Name.Buffer, prefix, prefix_length) == 0)
+            {                          
+                int volume;                   
+                WCHAR path0[MAX_PATH];
+                WCHAR path1[MAX_PATH];
+
+                swscanf(pobj->Name.Buffer + prefix_length, L"%d\\%s", &volume, path0);
+                wsprintf(path1, L"%c:\\%s", 'A' + volume - 1, path0);
+
+                if (wcscmp(path1, file) == 0)
+                {
+                    HANDLE hForClose;
+                    DuplicateHandle(hProcess, handle, hCurProcess, &hForClose, MAXIMUM_ALLOWED, FALSE, DUPLICATE_CLOSE_SOURCE);
+                    CloseHandle(hForClose);
+                }
+            }
+
+
+            CloseHandle(hCopy);
+            HeapFree(heap, 0, pobj);
+        }
+    }
+
+    CloseHandle(hProcess);
 }
+
+static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
+{
+    HANDLE heap_handle  = GetProcessHeap();
+    const WCHAR* szFile = (const WCHAR*)data;
+
+    int   i;
+    UINT  nProcInfoNeeded;
+    UINT  nProcInfo = 10;    
+    DWORD dwError;                                  
+    DWORD dwReason;
+    DWORD dwSession;     
+    RM_PROCESS_INFO rgpi[10];
+    WCHAR szSessionKey[CCH_RM_SESSION_KEY + 1] = { 0 };
+
+    /* Create system info */
+    size_t sys_info_size = 0;
+    SYSTEM_HANDLE_INFORMATION* sys_info = NULL;
+    {
+        ULONG res;
+        NTSTATUS status;
+        do
+        {
+            HeapFree(heap_handle, 0, sys_info);
+            sys_info_size += 4096;
+            sys_info = (SYSTEM_HANDLE_INFORMATION*)HeapAlloc(heap_handle, 0, sys_info_size);
+            status = NtQuerySystemInformation(SystemHandleInformation, sys_info, sys_info_size, &res);
+        } while (status == NTSTATUS_INFO_LENGTH_MISMATCH);
+    }
+
+    dwError = RmStartSession(&dwSession, 0, szSessionKey);
+    if (dwError == ERROR_SUCCESS)
+    {
+        dwError = RmRegisterResources(dwSession, 1, (const WCHAR**)&szFile, 0, NULL, 0, NULL);
+        if (dwError == ERROR_SUCCESS)
+        {
+
+            dwError = RmGetList(dwSession, &nProcInfoNeeded, &nProcInfo, rgpi, &dwReason);
+            if (dwError == ERROR_SUCCESS)
+            {
+                for (i = 0; i < nProcInfo; i++)
+                {
+                    HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, rgpi[i].Process.dwProcessId);
+                    if (hProcess) 
+                    {
+                        csfx__unlock_file_from_process(heap_handle, sys_info, sys_info_size, rgpi[i].Process.dwProcessId, szFile);
+                        CloseHandle(hProcess);
+                    }
+                }
+            }
+        }
+        RmEndSession(dwSession);
+    }            
+
+    /* Clean up */
+    HeapFree(heap_handle, 0, sys_info);
+    HeapFree(heap_handle, 0, (void*)szFile);
+
+    return 0;
+}
+
+#undef NTSTATUS_SUCCESS             
+#undef NTSTATUS_INFO_LENGTH_MISMATCH 
+#undef SystemHandleInformation
+static void csfx__unlock_pdb_file(const char* file)
+{
+    HANDLE heap_handle = GetProcessHeap();
+
+    int i, chr;
+    char drv[8];
+    char dir[MAX_PATH];
+    char name[MAX_PATH];
+    char path[MAX_PATH];
+    GetFullPathNameA(file, MAX_PATH, path, NULL);
+    _splitpath(path, drv, dir, name, NULL);
+    _sprintf_p(path, MAX_PATH, "%s%s%s.pdb", drv, dir, name);
+
+    file = path;
+    WCHAR* szFile = (WCHAR*)HeapAlloc(heap_handle, 0, MAX_PATH);
+    for (i = 0, chr = *file++; chr; chr = *file++, i++)
+    {
+        szFile[i] = (WCHAR)chr;
+    }
+    szFile[i] = 0;
+
+#if !defined(CSFX_SINGLE_THREAD)
+    HANDLE thread = CreateThread(NULL, 0, csfx__unlock_pdb_file_routine, (void*)szFile, 0, NULL);
+    (void)thread;
+#else
+    csfx__unlock_pdb_file_routine((void*)szFile);
+#endif
+
+    /* Clean up szFile must be done in csfx__unlock_pdb_file_routine */
+}
+#  endif /* CSFX_PDB_UNLOCK */
 
 void csfx_init(void)
 {
@@ -542,6 +730,7 @@ static int csfx__call_main(csfx_script_t* script, void* library, int state)
 void csfx_script_init(csfx_script_t* script, const char* path)
 {
     script->state    = CSFX_NONE;
+    script->errcode  = CSFX_ERROR_NONE;
     script->libtime  = 0;
     script->library  = NULL;
     script->userdata = NULL;
@@ -616,8 +805,7 @@ int csfx_script_update(csfx_script_t* script)
 		script->library = library;
 		script->libtime = csfx__last_modify_time(script->filepath);
 
-		#ifdef _MSC_VER
-		/* @note: belove call is still not working */
+		#if defined(_MSC_VER) && defined(CSFX_PDB_UNLOCK)
 		csfx__unlock_pdb_file(script->filepath);
 		#endif
 
@@ -669,6 +857,7 @@ int csfx_watch_files(csfx_filetime_t* files, int count)
     return changed;
 }
 
+/* END OF CSFX_IMPL */
 #endif /* CSFX_IMPL */
 
 /* END OF EXTERN "C" */
