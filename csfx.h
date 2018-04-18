@@ -71,7 +71,7 @@ typedef struct
 
 /** Hot reload library API **/
 
-__csfx__ void  csfx_init(void);
+__csfx__ int   csfx_init(void);
 __csfx__ void  csfx_quit(void);
 
 /**
@@ -325,7 +325,7 @@ typedef struct
     UNICODE_STRING Name;
 } OBJECT_INFORMATION;
 
-static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATION* sys_info, ULONG sys_info_size, ULONG pid, const WCHAR* file)
+static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATION* sys_info, ULONG pid, const WCHAR* file)
 { 
     HANDLE hCurProcess = GetCurrentProcess();
     HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, pid);
@@ -394,6 +394,26 @@ static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATIO
     CloseHandle(hProcess);
 }
 
+static SYSTEM_HANDLE_INFORMATION* csfx__create_system_info(void)
+{                          
+    size_t sys_info_size = 0;
+    HANDLE heap_handle   = GetProcessHeap();
+    SYSTEM_HANDLE_INFORMATION* sys_info = NULL;
+    {
+        ULONG res;
+        NTSTATUS status;
+        do
+        {
+            HeapFree(heap_handle, 0, sys_info);
+            sys_info_size += 4096;
+            sys_info = (SYSTEM_HANDLE_INFORMATION*)HeapAlloc(heap_handle, 0, sys_info_size);
+            status = NtQuerySystemInformation(SystemHandleInformation, sys_info, sys_info_size, &res);
+        } while (status == NTSTATUS_INFO_LENGTH_MISMATCH);
+    }
+
+    return sys_info;
+}
+
 static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
 {
     HANDLE heap_handle  = GetProcessHeap();
@@ -409,19 +429,7 @@ static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
     WCHAR szSessionKey[CCH_RM_SESSION_KEY + 1] = { 0 };
 
     /* Create system info */
-    size_t sys_info_size = 0;
     SYSTEM_HANDLE_INFORMATION* sys_info = NULL;
-    {
-        ULONG res;
-        NTSTATUS status;
-        do
-        {
-            HeapFree(heap_handle, 0, sys_info);
-            sys_info_size += 4096;
-            sys_info = (SYSTEM_HANDLE_INFORMATION*)HeapAlloc(heap_handle, 0, sys_info_size);
-            status = NtQuerySystemInformation(SystemHandleInformation, sys_info, sys_info_size, &res);
-        } while (status == NTSTATUS_INFO_LENGTH_MISMATCH);
-    }
 
     dwError = RmStartSession(&dwSession, 0, szSessionKey);
     if (dwError == ERROR_SUCCESS)
@@ -434,13 +442,9 @@ static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
             if (dwError == ERROR_SUCCESS)
             {
                 for (i = 0; i < nProcInfo; i++)
-                {
-                    HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, rgpi[i].Process.dwProcessId);
-                    if (hProcess) 
-                    {
-                        csfx__unlock_file_from_process(heap_handle, sys_info, sys_info_size, rgpi[i].Process.dwProcessId, szFile);
-                        CloseHandle(hProcess);
-                    }
+                {                                            
+                    if (!sys_info) sys_info = csfx__create_system_info();
+                    csfx__unlock_file_from_process(heap_handle, sys_info, rgpi[i].Process.dwProcessId, szFile);
                 }
             }
         }
@@ -489,9 +493,9 @@ static void csfx__unlock_pdb_file(const char* file)
 }
 #  endif /* CSFX_PDB_UNLOCK */
 
-void csfx_init(void)
+int  csfx_init(void)
 {
-    /* NULL */
+    return -1;
 }
 
 void csfx_quit(void)
@@ -537,7 +541,7 @@ static void csfx__sighandler(int code)
     longjmp(csfx__jmpenv, errcode);
 }
 
-void csfx_init(void)
+int  csfx_init(void)
 {
     int idx;
     int signals[] = { SIGILL, SIGSEGV, SIGABRT };
@@ -545,14 +549,24 @@ void csfx_init(void)
     {
 	if (signal(signals[idx], csfx__sighandler) != 0)
 	{
-	    break;
+	    return -1;
 	}
     }
+
+    return 0;
 }
 
 void csfx_quit(void)
 {
-    /* NULL */
+    int idx;
+    int signals[] = { SIGILL, SIGSEGV, SIGABRT };
+    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
+    {
+	if (signal(signals[idx], SIG_DFL) != 0)
+	{
+	    break;
+	}
+    }
 }
 # endif /* _MSC_VER */
 
@@ -622,7 +636,7 @@ static void csfx__sighandler(int code, siginfo_t* info, void* context)
 }
 
 
-void csfx_init(void)
+int  csfx_init(void)
 {
     struct sigaction sa;
     sigemptyset(&sa.sa_mask);
@@ -636,14 +650,29 @@ void csfx_init(void)
     {
 	if (sigaction(signals[idx], &sa, NULL) != 0)
 	{
-	    break;
+	    return -1;
 	}
     }
+
+    return 0;
 }
 
 void csfx_quit(void)
-{
-    
+{    struct sigaction sa;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags     = SA_NODEFER;
+    sa.sa_handler   = SIG_DFL;
+    sa.sa_sigaction = NULL;
+
+    int idx;
+    int signals[] = { SIGBUS, SIGILL, SIGSEGV, SIGABRT };
+    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
+    {
+	if (sigaction(signals[idx], &sa, NULL) != 0)
+	{
+	    break;
+	}
+    }
 }
 #else
 #error "Unsupported platform"
