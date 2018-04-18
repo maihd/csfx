@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include "csfx.h"
 
-void* csfx_main(void* userdata, int state)
+void* csfx_main(void* userdata, int old_state, int state)
 {
     int* ptr = NULL;
 

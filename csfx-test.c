@@ -1,22 +1,47 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
+
+#if defined(_MSC) || defined(__TINYC__)
+#include <Windows.h>
+#define _sleep(ms) Sleep(ms)
+#else
 #include <unistd.h>
+#define _sleep(ms) usleep((ms) * 1000)
+#endif
 
 #define CSFX_IMPL
 #include "csfx.h"
 
+#if !defined(__CYGWIN__) && !defined(_WIN32)
+#define _LIBNAME "./csfx-temp.so"
+#else
+#define _LIBNAME "./csfx-temp.dll"
+#endif
+
+static struct
+{
+    int quit;
+} app;
+
+void _sighandler(int state)
+{
+    (void)state;
+    if (state == SIGINT)
+    {
+	app.quit = 1;
+    }
+}
+
 int main(int argc, char* argv[])
 {
-#if !defined(__CYGWIN__) && !defined(__MINGW32__)
-    const char* libname = "./csfx-temp.so";
-#else
-    const char* libname = "./csfx-temp.dll";
-#endif
+
+    signal(SIGINT, _sighandler);
 
     csfx_init();
     
     csfx_script_t script;
-    csfx_script_init(&script, libname);
+    csfx_script_init(&script, _LIBNAME);
 
     csfx_filetime_t files[] =
     {
@@ -27,14 +52,14 @@ int main(int argc, char* argv[])
      * csfx_watch_files(files, sizeof(files) / sizeof(files[0]));
      */
     
-    while (1)
+    while (!app.quit)
     {
 	if (csfx_watch_files(files, sizeof(files) / sizeof(files[0])))
 	{
-#if !defined(__CYGWIN__) && !defined(__MINGW32__)
-	    system("gcc -shared -o csfx-temp.so  csfx-temp.c");
+#if defined(__TINYC__)
+	    system("tcc -shared -o " _LIBNAME " csfx-temp.c");
 #else
-	    system("gcc -shared -o csfx-temp.dll csfx-temp.c");
+	    system("gcc -shared -o " _LIBNAME " csfx-temp.c");
 #endif
 	    
 	    /* Update folders time after build */
@@ -61,7 +86,7 @@ int main(int argc, char* argv[])
 	    break;
 	}
 	
-	usleep(1000 * 1000);
+	_sleep(1000);
     }
 
     csfx_script_free(&script);

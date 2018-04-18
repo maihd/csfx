@@ -104,11 +104,12 @@ __csfx__ const char* csfx_script_errmsg(csfx_script_t* script);
 # define csfx_except(s) __except(csfx__seh_filter(s, GetExceptionCode()))
 # define csfx_finally   __finally
 __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
-#elif (__unix__) && !defined(__MINGW32__)
+#elif (__unix__)
 # include <signal.h>
 # include <setjmp.h>
-# define csfx_try(s)						\
-    (s)->errcode = sigsetjmp(csfx__jmpenv, CSFX_ERROR_NONE);	\
+# define csfx_try(s)							\
+    (s)->errcode = sigsetjmp(csfx__jmpenv, 0);				\
+    if ((s)->errcode == 0) (s)->errcode = CSFX_ERROR_NONE;		\
     if ((s)->errcode == CSFX_ERROR_NONE)
 
 # define csfx_except(s) else if (csfx__errcode_filter(s))
@@ -118,11 +119,23 @@ __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
 
 extern __thread sigjmp_buf csfx__jmpenv;
 #else
-# define csfx_try(s)    if (((s)->errcode = CSFX_ERROR_NONE) || 1)
+# include <signal.h>
+# include <setjmp.h>
+# define csfx_try(s)						\
+    (s)->errcode = setjmp(csfx__jmpenv);			\
+    if ((s)->errcode == 0) (s)->errcode = CSFX_ERROR_NONE;	\
+    if ((s)->errcode == CSFX_ERROR_NONE)
+
 # define csfx_except(s) else if (csfx__errcode_filter(s))
 # define csfx_finally   else
 # define csfx__errcode_filter(s)					\
     (s)->errcode > CSFX_ERROR_NONE && (s)->errcode <= CSFX_ERROR_MEMORY
+
+extern
+# if defined(__MINGW32__)
+__thread
+# endif
+jmp_buf csfx__jmpenv;
 #endif
 
 /**
@@ -144,12 +157,12 @@ __csfx__ int csfx_watch_files(csfx_filetime_t* files, int count);
 /**
  * Script main function
  */
-#if defined(_MSC_VER) || defined(__MINGW32__) || defined(__CYGWIN__)
+#if defined(_WIN32) || defined(__CYGWIN__)
 __declspec(dllexport)
 #else
 extern
 #endif
-void* csfx_main(void* userdata, int state);
+void* csfx_main(void* userdata, int old_state, int new_state);
 
 /* --------------------------------------------- */
 /* ----------------- CSFX_IMPL ----------------- */
@@ -161,7 +174,7 @@ void* csfx_main(void* userdata, int state);
 #include <stdlib.h>
 
 /* Define dynamic library loading API */
-#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
+#if defined(_WIN32)
 # include <Windows.h>
 # define csfx__dlib_load(path)   (void*)LoadLibraryA(path)
 # define csfx__dlib_free(lib)    FreeLibrary((HMODULE)lib)
@@ -196,7 +209,7 @@ static const char* csfx__dlib_errmsg(void)
 
 
 /** Custom helper functions **/
-#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
+#if defined(_WIN32)
 
 # define CSFX__PATH_LENGTH MAX_PATH
 
@@ -271,7 +284,7 @@ int csfx__seh_filter(csfx_script_t* script, unsigned long code)
 static int csfx__remove_file(const char* path);
 static char* csfx__get_temp_path(const char* path);
 
-#if defined(_MSC_VER)
+# ifdef _MSC_VER
 static int csfx__unlock_pdb_file(const char* dllpath)
 {
     char drive[12];
@@ -287,7 +300,6 @@ static int csfx__unlock_pdb_file(const char* dllpath)
     sprintf_s(scmd, CSFX__PATH_LENGTH, "del /Q %s", path);
     return system(scmd);
 }
-#endif
 
 void csfx_init(void)
 {
@@ -298,6 +310,63 @@ void csfx_quit(void)
 {
     /* NULL */
 }
+# else
+
+#  if defined(__MINGW32__)
+__thread
+#  else
+__declspec(thread)
+#  endif
+jmp_buf csfx__jmpenv;
+
+static void csfx__sighandler(int code)
+{
+    int errcode;
+    switch (code)
+    {
+    case SIGILL:
+	errcode = CSFX_ERROR_INSTR;
+	break;
+
+	/*
+    case SIGBUS:
+	errcode = CSFX_ERROR_ALIGN;
+	break;
+	*/
+
+    case SIGABRT:
+	errcode = CSFX_ERROR_ABORT;
+	break;
+
+    case SIGSEGV:
+	errcode = CSFX_ERROR_MEMORY;
+	break;
+	
+    default:
+	errcode = CSFX_ERROR_NONE;
+	break;
+    }
+    longjmp(csfx__jmpenv, errcode);
+}
+
+void csfx_init(void)
+{
+    int idx;
+    int signals[] = { SIGILL, SIGSEGV, SIGABRT };
+    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
+    {
+	if (signal(signals[idx], csfx__sighandler) != 0)
+	{
+	    break;
+	}
+    }
+}
+
+void csfx_quit(void)
+{
+    /* NULL */
+}
+# endif /* _MSC_VER */
 
 #elif defined(__unix__)
 # include <sys/stat.h>
@@ -335,6 +404,10 @@ static int csfx__copy_file(const char* from_path, const char* to_path)
 static void csfx__sighandler(int code, siginfo_t* info, void* context)
 {
     int errcode;
+
+    (void)info;
+    (void)context;
+    
     switch (code)
     {
     case SIGILL:
@@ -446,7 +519,7 @@ static int csfx__file_changed(csfx_filetime_t* ft)
 
 static int csfx__call_main(csfx_script_t* script, void* library, int state)
 {
-    typedef void* (*csfx_main_f)(void*, int);
+    typedef void* (*csfx_main_f)(void*, int, int);
 
     const char* name = "csfx_main";
     csfx_main_f func = (csfx_main_f)csfx__dlib_symbol(library, name);
@@ -455,7 +528,7 @@ static int csfx__call_main(csfx_script_t* script, void* library, int state)
     {
 	csfx_try (script)
 	{
-	    script->userdata = func(script->userdata, state);
+	    script->userdata = func(script->userdata, script->state, state);
 	}
 	csfx_except (script)
 	{
@@ -537,13 +610,14 @@ int csfx_script_update(csfx_script_t* script)
 	    if (library)
 	    {
 		int state = script->state; /* new state */
-		state = state != CSFX_UNLOAD ? CSFX_INIT : CSFX_RELOAD;
+		state = state == CSFX_NONE ? CSFX_INIT : CSFX_RELOAD;
 		csfx__call_main(script, library, state);
 
 		script->library = library;
 		script->libtime = csfx__last_modify_time(script->filepath);
 
 		#ifdef _MSC_VER
+		/* @note: belove call is still not working */
 		csfx__unlock_pdb_file(script->filepath);
 		#endif
 
@@ -560,13 +634,18 @@ int csfx_script_update(csfx_script_t* script)
 		}
 	    }
 	}
+
+	return script->state;
     }
     else
     {
-	script->state = CSFX_NONE;
-    }
+	if (script->state != CSFX_FAILED)
+	{
+	    script->state = CSFX_NONE;
+	}
 
-    return script->state;
+	return CSFX_NONE;
+    }
 }
 
 void* csfx_script_symbol(csfx_script_t* script, const char* name)
