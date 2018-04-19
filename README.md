@@ -98,4 +98,4 @@ void on_update(void* userdata)
 4. TinyCC     - Test passed
 
 ## Meta
-Copyright: 2018
+Copyright: 2018, MaiHD @ ${HOME}

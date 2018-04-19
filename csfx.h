@@ -164,6 +164,12 @@ extern
 #endif
 void* csfx_main(void* userdata, int old_state, int new_state);
 
+/* END OF EXTERN "C" */
+CSFX_EXTERN_C_END;
+
+#endif /* __CSFX_H__ */
+
+
 /* --------------------------------------------- */
 /* ----------------- CSFX_IMPL ----------------- */
 /* --------------------------------------------- */
@@ -876,20 +882,19 @@ const char* csfx_script_errmsg(csfx_script_t* script)
     return csfx__dlib_errmsg();
 }
 
+/* @impl: csfx_watch_files */
 int csfx_watch_files(csfx_filetime_t* files, int count)
 {
     int changed = 0;
     for (int i = 0; i < count; i++)
     {
-	changed = csfx__file_changed(&files[i]) || changed;
+	if (csfx__file_changed(&files[i]))
+	{
+	    changed = 1;
+	}
     }
     return changed;
 }
 
 /* END OF CSFX_IMPL */
 #endif /* CSFX_IMPL */
-
-/* END OF EXTERN "C" */
-CSFX_EXTERN_C_END;
-
-#endif /* __CSFX_H__ */
