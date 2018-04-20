@@ -23,10 +23,13 @@ __api__ void app_msgbox(const char* title, const char* message, int mode);
 __api__ void app_loginfo(const char* fmt, ...);
 __api__ void app_logerror(const char* fmt, ...);
 
-__api__ void app_quit(void);
 __api__ int  app_isquit(void);
 __api__ void app_usleep(long us);
 __api__ void app_update(csfx_script_t* script);
 __api__ void app_create_window(HINSTANCE hInstance);
+
+__api__ void draw_rect(float x, float y, float w, float h);
+__api__ void draw_circle(float x, float y, float r);
+__api__ void draw_ellipse(float x, float y, float w, float h);
 
 #endif

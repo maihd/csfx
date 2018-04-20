@@ -45,6 +45,7 @@ int app_isquit(void)
     return app.quit;
 }
 
+void app_quit(void);
 void app_init(HWND hwnd)
 {
     HDC  hdc;
@@ -69,6 +70,9 @@ void app_init(HWND hwnd)
     SelectObject(app.backbuf.hdc, app.backbuf.bmp);
     
     signal(SIGINT, app_sighandler);
+
+    /* Listen exit event */
+    atexit(app_quit);
 }
 
 void app_quit(void)

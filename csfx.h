@@ -58,6 +58,11 @@ typedef struct
     void*       userdata;
     const char* filepath;
     const char* temppath;
+
+#if defined(_MSC_VER)
+    long        pdbtime;
+    const char* pdbfpath; /* pdb full path */
+#endif
 } csfx_script_t;
 
 /**
@@ -464,23 +469,25 @@ static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
     return 0;
 }
 
-#undef NTSTATUS_SUCCESS             
-#undef NTSTATUS_INFO_LENGTH_MISMATCH 
-#undef SystemHandleInformation
+static char* csfx__get_pdb_fpath(const char* dllfile)
+{
+    int i, chr;
+    char drv[8];
+    char dir[MAX_PATH];
+    char name[MAX_PATH];
+    char* path = (char*)malloc(MAX_PATH);
+    GetFullPathNameA(dllfile, MAX_PATH, path, NULL);
+    _splitpath(path, drv, dir, name, NULL);
+    _sprintf_p(path, MAX_PATH, "%s%s%s.pdb", drv, dir, name);
+
+    return path;
+}
+
 static void csfx__unlock_pdb_file(const char* file)
 {
     HANDLE heap_handle = GetProcessHeap();
 
     int i, chr;
-    char drv[8];
-    char dir[MAX_PATH];
-    char name[MAX_PATH];
-    char path[MAX_PATH];
-    GetFullPathNameA(file, MAX_PATH, path, NULL);
-    _splitpath(path, drv, dir, name, NULL);
-    _sprintf_p(path, MAX_PATH, "%s%s%s.pdb", drv, dir, name);
-
-    file = path;
     WCHAR* szFile = (WCHAR*)HeapAlloc(heap_handle, 0, MAX_PATH);
     for (i = 0, chr = *file++; chr; chr = *file++, i++)
     {
@@ -721,7 +728,16 @@ static int csfx__script_changed(csfx_script_t* script)
 {
     long src = script->libtime;
     long cur = csfx__last_modify_time(script->filepath);
-    return cur > src;
+    int  res = cur > src;
+#if defined(_MSC_VER)
+    if (res)
+    {  
+        src = script->pdbtime;
+        cur = csfx__last_modify_time(script->pdbfpath);
+        res = cur > src;
+    }
+#endif
+    return res;
 }
 
 static int csfx__file_changed(csfx_filetime_t* ft)
@@ -771,6 +787,11 @@ void csfx_script_init(csfx_script_t* script, const char* path)
     script->userdata = NULL;
     script->filepath = path;
     script->temppath = csfx__get_temp_path(path);
+    
+#if defined(_MSC_VER)
+    script->pdbtime  = 0;
+    script->pdbfpath = csfx__get_pdb_fpath(path);
+#endif
 }
 
 void csfx_script_free(csfx_script_t* script)
@@ -794,7 +815,14 @@ void csfx_script_free(csfx_script_t* script)
     script->libtime  = 0;
     script->library  = NULL;
     script->filepath = NULL;
-    script->temppath = NULL;
+    script->temppath = NULL;    
+
+#if defined(_MSC_VER)              
+    free((void*)script->pdbfpath);  
+
+    script->pdbtime  = 0;
+    script->pdbfpath = NULL;
+#endif
 }
 
 int csfx_script_update(csfx_script_t* script)
@@ -840,10 +868,6 @@ int csfx_script_update(csfx_script_t* script)
 		script->library = library;
 		script->libtime = csfx__last_modify_time(script->filepath);
 
-		#if defined(_MSC_VER) && defined(CSFX_PDB_UNLOCK)
-		csfx__unlock_pdb_file(script->filepath);
-		#endif
-
 		if (script->errcode != CSFX_ERROR_NONE)
 		{
 		    csfx__dlib_free(script->library);
@@ -853,7 +877,14 @@ int csfx_script_update(csfx_script_t* script)
 		}
 		else
 		{
-		    script->state = state;
+		    script->state = state;    
+
+#if defined(_MSC_VER)
+# if defined(CSFX_PDB_UNLOCK)
+            csfx__unlock_pdb_file(script->pdbfpath);                   
+# endif                                                                     
+            script->pdbtime = csfx__last_modify_time(script->pdbfpath);
+#endif
 		}
 	    }
 	}

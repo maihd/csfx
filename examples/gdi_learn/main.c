@@ -65,7 +65,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     printf("\n");
     printf("======================================\n");
     
-    app_quit();
     csfx_quit();
     csfx_script_free(&script);
     return 0;

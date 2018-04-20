@@ -92,7 +92,7 @@ void on_update(void* userdata)
 ```
 
 ## Compitability
-1. Visual C++ - Test passed, unlock pdb, missing debug info after 3 reloadings
+1. Visual C++ - Test passed, unlock .pdb, reload .pdb when reload .dll
 2. GCC        - Test passed with Cygwin
 3. MinGW      - Test passed
 4. TinyCC     - Test passed
