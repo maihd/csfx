@@ -51,18 +51,10 @@ enum
  */
 typedef struct
 {
-    int         state;
-    int         errcode;
-    long        libtime;
-    void*       library;
-    void*       userdata;
-    const char* filepath;
-    const char* temppath;
-
-#if defined(_MSC_VER)
-    long        pdbtime;
-    const char* pdbfpath; /* pdb full path */
-#endif
+    int   state;
+    int   errcode;
+    void* userdata;
+    char  internal[sizeof(void*)];
 } csfx_script_t;
 
 /**
@@ -189,8 +181,34 @@ CSFX_EXTERN_C_END;
 # define CSFX_PDB_DELETE
 #endif
 
+#ifdef CSFX_PDB_DELETE
+# define CSFX_PDB_UNLOCK
+#endif
+
 #ifdef CSFX_IMPL
 /* BEGIN OF CSFX_IMPL */
+
+# define CSFX__MAX_PATH 256
+
+typedef struct
+{
+    void* library;
+
+#if defined(_MSC_VER) && defined(CSFX_PDB_UNLOCK)
+    long  libtime;
+    long  pdbtime;
+    
+    char  librpath[CSFX__MAX_PATH];
+    char  libtpath[CSFX__MAX_PATH];
+    char  pdbrpath[CSFX__MAX_PATH];
+    char  pdbtpath[CSFX__MAX_PATH];
+#else
+    long  libtime;
+    
+    char  librpath[CSFX__MAX_PATH];
+    char  libtpath[CSFX__MAX_PATH];
+#endif
+} csfx__script_data_t;
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,8 +251,6 @@ static const char* csfx__dlib_errmsg(void)
 /** Custom helper functions **/
 #if defined(_WIN32)
 
-# define CSFX__PATH_LENGTH MAX_PATH
-
 static long csfx__last_modify_time(const char* path)
 {
     WIN32_FILE_ATTRIBUTE_DATA fad;
@@ -244,8 +260,8 @@ static long csfx__last_modify_time(const char* path)
     }
 
     LARGE_INTEGER time;
+    time.LowPart  = fad.ftLastWriteTime.dwLowDateTime;
     time.HighPart = fad.ftLastWriteTime.dwHighDateTime;
-    time.LowPart = fad.ftLastWriteTime.dwLowDateTime;
 
     return (long)(time.QuadPart / 10000000L - 11644473600L);
 }
@@ -304,7 +320,6 @@ int csfx__seh_filter(csfx_script_t* script, unsigned long code)
 }
 
 static int csfx__remove_file(const char* path);
-static char* csfx__get_temp_path(const char* path);
 
 # if defined(_MSC_VER)
 
@@ -465,30 +480,16 @@ static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
         RmEndSession(dwSession);
     }            
 
-    /* Clean up */
-    HeapFree(heap_handle, 0, sys_info);
-    HeapFree(heap_handle, 0, (void*)szFile);
-
     /* Remove the .pdb file if required */
 #if defined(CSFX_PDB_DELETE)
     DeleteFileW(szFile);
 #endif
 
+    /* Clean up */
+    HeapFree(heap_handle, 0, sys_info);
+    HeapFree(heap_handle, 0, (void*)szFile);
+
     return 0;
-}
-
-static char* csfx__get_pdb_fpath(const char* dllfile)
-{
-    int i, chr;
-    char drv[8];
-    char dir[MAX_PATH];
-    char name[MAX_PATH];
-    char* path = (char*)malloc(MAX_PATH);
-    GetFullPathNameA(dllfile, MAX_PATH, path, NULL);
-    _splitpath(path, drv, dir, name, NULL);
-    _sprintf_p(path, MAX_PATH, "%s%s%s.pdb", drv, dir, name);
-
-    return path;
 }
 
 static void csfx__unlock_pdb_file(const char* file)
@@ -511,6 +512,17 @@ static void csfx__unlock_pdb_file(const char* file)
 #endif
 
     /* Clean up szFile must be done in csfx__unlock_pdb_file_routine */
+}   
+
+static int csfx__get_pdb_path(const char* libpath, char* buf, int len)
+{
+    int i, chr;
+    char drv[8];
+    char dir[MAX_PATH];
+    char name[MAX_PATH];
+    GetFullPathNameA(libpath, len, buf, NULL);
+    _splitpath(buf, drv, dir, name, NULL);
+    return snprintf(buf, len, "%s%s%s.pdb", drv, dir, name);
 }
 #  endif /* CSFX_PDB_UNLOCK */
 
@@ -679,7 +691,8 @@ int  csfx_init(void)
 }
 
 void csfx_quit(void)
-{    struct sigaction sa;
+{
+    struct sigaction sa;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags     = SA_NODEFER;
     sa.sa_handler   = SIG_DFL;
@@ -704,20 +717,18 @@ static int csfx__remove_file(const char* path)
     return remove(path);
 }
 
-static char* csfx__get_temp_path(const char* path)
+static int csfx__get_temp_path(const char* path, char* buffer, int length)
 {
-    char* res = NULL;
+    int res;
     
-    if (path)
-    {
-	res = (char*)malloc(CSFX__PATH_LENGTH);
-	    
+    if (buffer)
+    { 
 	int version = 0;
 	while (1)
 	{
-	    sprintf(res, "%s.%d", path, version++);
+	    res = snprintf(buffer, length, "%s.%d", path, version++);
 
-	    FILE* file = fopen(res, "r");
+	    FILE* file = fopen(buffer, "r");
 	    if (file)
 	    {
 		fclose(file);
@@ -734,15 +745,20 @@ static char* csfx__get_temp_path(const char* path)
 
 static int csfx__script_changed(csfx_script_t* script)
 {
-    long src = script->libtime;
-    long cur = csfx__last_modify_time(script->filepath);
+    typedef csfx__script_data_t data_t;
+
+    data_t** dptr = (data_t**)(&script->internal);
+    data_t*  data = *dptr;
+    
+    long src = data->libtime;
+    long cur = csfx__last_modify_time(data->librpath);
     int  res = cur > src;
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && defined(CSFX_PDB_UNLOCK)
     if (res)
     {  
-        src = script->pdbtime;
-        cur = csfx__last_modify_time(script->pdbfpath);
-        res = cur > src;
+        src = data->pdbtime;
+        cur = csfx__last_modify_time(data->pdbrpath);
+        res = (cur == src && cur == 0) || cur > src;
     }
 #endif
     return res;
@@ -786,61 +802,79 @@ static int csfx__call_main(csfx_script_t* script, void* library, int state)
     return 0;
 }
 
-void csfx_script_init(csfx_script_t* script, const char* path)
+/* @impl: csfx_script_init */
+void csfx_script_init(csfx_script_t* script, const char* libpath)
 {
+    typedef csfx__script_data_t data_t;
+    
     script->state    = CSFX_NONE;
     script->errcode  = CSFX_ERROR_NONE;
-    script->libtime  = 0;
-    script->library  = NULL;
     script->userdata = NULL;
-    script->filepath = path;
-    script->temppath = csfx__get_temp_path(path);
+
+    data_t** dptr = (data_t**)(&script->internal);
+    data_t*  data = (data_t*)(malloc(sizeof(data_t)));
+
+    if (data)
+    {
+	*dptr = data;
+	
+	data->libtime = 0;
+	data->library = NULL;
+	strncpy(data->librpath, libpath, CSFX__MAX_PATH);
+	csfx__get_temp_path(libpath, data->libtpath, CSFX__MAX_PATH);
     
-#if defined(_MSC_VER)
-    script->pdbtime  = 0;
-    script->pdbfpath = csfx__get_pdb_fpath(path);
+#if defined(_MSC_VER) || defined(CSFX_PDB_UNLOCK)
+	data->pdbtime = 0;
+	csfx__get_pdb_path(libpath, data->pdbrpath, CSFX__MAX_PATH);
+	csfx__get_temp_path(data->pdbrpath, data->pdbtpath, CSFX__MAX_PATH);
 #endif
+    }
 }
 
 void csfx_script_free(csfx_script_t* script)
 {
+    typedef csfx__script_data_t data_t;
+    
+    if (!script) return;
+
+    data_t** dptr = (data_t**)(&script->internal);
+    data_t*  data = *dptr;
+
     /* Raise quit event */
-    if (script->library)
+    if (data->library)
     {
-	void* library;
-	
-	library = script->library;
-	csfx__call_main(script, library, (script->state = CSFX_QUIT));
-	csfx__dlib_free(library);
+	script->state = CSFX_QUIT;
+	csfx__call_main(script, data->library, script->state);
+	csfx__dlib_free(data->library);
 	
 	/* Remove temp library */
-	csfx__remove_file(script->temppath); /* Ignore error code */
+	csfx__remove_file(data->libtpath); /* Ignore error code */
+
+	
+#if defined(_MSC_VER) && defined(CSFX_PDB_DELETE)
+	csfx__copy_file(data->pdbtpath, data->pdbrpath);
+	csfx__remove_file(data->pdbtpath);
+#endif
     }
 
-    /* script->temppath is in heap */
-    free((void*)script->temppath);
-    
-    script->libtime  = 0;
-    script->library  = NULL;
-    script->filepath = NULL;
-    script->temppath = NULL;    
-
-#if defined(_MSC_VER)              
-    free((void*)script->pdbfpath);  
-
-    script->pdbtime  = 0;
-    script->pdbfpath = NULL;
-#endif
+    /* Clean up */
+    free(data);
+    *dptr = NULL;
 }
 
 int csfx_script_update(csfx_script_t* script)
 {
+    typedef csfx__script_data_t data_t;
+    
+    data_t** dptr = (data_t**)(&script->internal);
+    data_t*  data = *dptr;
+    
     if (csfx__script_changed(script))
     {
 	void* library;
 
 	/* Unload old version */
-	library = script->library;
+	library = data->library;
 	if (library)
 	{
 	    /* Raise unload event */
@@ -849,7 +883,7 @@ int csfx_script_update(csfx_script_t* script)
 
 	    /* Collect garbage */
 	    csfx__dlib_free(library);
-	    script->library = NULL;
+	    data->library = NULL;
 
 	    if (script->errcode != CSFX_ERROR_NONE)
 	    {
@@ -863,35 +897,37 @@ int csfx_script_update(csfx_script_t* script)
 	}
 
 	/* Create and load new temp version */
-	csfx__remove_file(script->temppath); /* Remove temp library */
-	if (csfx__copy_file(script->filepath, script->temppath))
+	csfx__remove_file(data->libtpath); /* Remove temp library */
+	if (csfx__copy_file(data->librpath, data->libtpath))
 	{
-	    library = csfx__dlib_load(script->temppath); 
+	    library = csfx__dlib_load(data->libtpath); 
 	    if (library)
 	    {
 		int state = script->state; /* new state */
 		state = state == CSFX_NONE ? CSFX_INIT : CSFX_RELOAD;
 		csfx__call_main(script, library, state);
 
-		script->library = library;
-		script->libtime = csfx__last_modify_time(script->filepath);
+		data->library = library;
+		data->libtime = csfx__last_modify_time(data->librpath);
 
 		if (script->errcode != CSFX_ERROR_NONE)
 		{
-		    csfx__dlib_free(script->library);
+		    csfx__dlib_free(data->library);
 		    
+		    data->library = NULL;
 		    script->state = CSFX_FAILED;
-		    script->library = NULL;
 		}
 		else
 		{
 		    script->state = state;    
 
-#if defined(_MSC_VER)
-# if defined(CSFX_PDB_UNLOCK) || defined(CSFX_PDB_DELETE)
-            csfx__unlock_pdb_file(script->pdbfpath);                   
-# endif                                                                     
-            script->pdbtime = csfx__last_modify_time(script->pdbfpath);
+#if defined(_MSC_VER) && defined(CSFX_PDB_UNLOCK)
+# if defined(CSFX_PDB_DELETE)
+		    csfx__remove_file(data->pdbtpath);
+		    csfx__copy_file(data->pdbrpath, data->pdbtpath);
+# endif
+		    csfx__unlock_pdb_file(data->pdbrpath); 
+		    data->pdbtime = csfx__last_modify_time(data->pdbrpath);
 #endif
 		}
 	    }
@@ -912,7 +948,11 @@ int csfx_script_update(csfx_script_t* script)
 
 void* csfx_script_symbol(csfx_script_t* script, const char* name)
 {
-    return csfx__dlib_symbol(script->library, name);
+    typedef csfx__script_data_t data_t;
+
+    data_t** dptr = (data_t**)(&script->internal);
+    data_t*  data = *dptr;
+    return csfx__dlib_symbol(data->library, name);
 }
 
 const char* csfx_script_errmsg(csfx_script_t* script)
