@@ -184,6 +184,11 @@ CSFX_EXTERN_C_END;
 # define CSFX_PDB_UNLOCK
 #endif
 
+#ifdef CSFX_IMPL_WITH_PDB_DELETE
+# define CSFX_IMPL
+# define CSFX_PDB_DELETE
+#endif
+
 #ifdef CSFX_IMPL
 /* BEGIN OF CSFX_IMPL */
 
@@ -303,7 +308,7 @@ static char* csfx__get_temp_path(const char* path);
 
 # if defined(_MSC_VER)
 
-#  if defined(CSFX_PDB_UNLOCK)
+#  if defined(CSFX_PDB_UNLOCK) || defined(CSFX_PDB_DELETE)
 #   include <winternl.h>
 #   include <RestartManager.h> 
 #   pragma comment(lib, "ntdll.lib")
@@ -338,6 +343,7 @@ typedef struct
 
 static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATION* sys_info, ULONG pid, const WCHAR* file)
 { 
+    // Make sure the process is valid
     HANDLE hCurProcess = GetCurrentProcess();
     HANDLE hProcess = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess)
@@ -346,7 +352,6 @@ static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATIO
     }
 
     int i;
-    int handles = 0;
     for (i = 0; i < sys_info->HandleCount; i++)
     {
         SYSTEM_HANDLE* handle_info = &sys_info->Handles[i];
@@ -354,8 +359,6 @@ static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATIO
 
         if (handle_info->ProcessId == pid)
         {
-            handles++;
-
             HANDLE hCopy; // Duplicate the handle in the current process
             if (!DuplicateHandle(hProcess, handle, hCurProcess, &hCopy, MAXIMUM_ALLOWED, FALSE, 0))
             {
@@ -386,7 +389,7 @@ static void csfx__unlock_file_from_process(HANDLE heap, SYSTEM_HANDLE_INFORMATIO
                 WCHAR path1[MAX_PATH];
 
                 swscanf(pobj->Name.Buffer + prefix_length, L"%d\\%s", &volume, path0);
-                wsprintf(path1, L"%c:\\%s", 'A' + volume - 1, path0);
+                wsprintfW(path1, L"%c:\\%s", 'A' + volume - 1, path0);
 
                 if (wcscmp(path1, file) == 0)
                 {
@@ -465,6 +468,11 @@ static DWORD WINAPI csfx__unlock_pdb_file_routine(void* data)
     /* Clean up */
     HeapFree(heap_handle, 0, sys_info);
     HeapFree(heap_handle, 0, (void*)szFile);
+
+    /* Remove the .pdb file if required */
+#if defined(CSFX_PDB_DELETE)
+    DeleteFileW(szFile);
+#endif
 
     return 0;
 }
@@ -880,7 +888,7 @@ int csfx_script_update(csfx_script_t* script)
 		    script->state = state;    
 
 #if defined(_MSC_VER)
-# if defined(CSFX_PDB_UNLOCK)
+# if defined(CSFX_PDB_UNLOCK) || defined(CSFX_PDB_DELETE)
             csfx__unlock_pdb_file(script->pdbfpath);                   
 # endif                                                                     
             script->pdbtime = csfx__last_modify_time(script->pdbfpath);

@@ -3,9 +3,21 @@
 ## Example
 1. Application:
 ```C
-#define CSFX_IMPL
-#define CSFX_PDB_UNLOCK
-#define CSFX_IMPL_WITH_PDB_UNLOCK /* Equal 2 lines above */
+#if defined(OPTION_1)
+/* This version will just unlock .pdb
+ * When rebuild script library may not rebuild .pdb
+ */
+# define CSFX_IMPL
+# define CSFX_PDB_UNLOCK
+# define CSFX_IMPL_WITH_PDB_UNLOCK /* Equal 2 lines above */
+#else
+/* This version will unlock and delete .pdb
+ * When rebuild script library will also rebuild .pdb
+ */
+# define CSFX_IMPL
+# define CSFX_PDB_DELETE
+# define CSFX_IMPL_WITH_PDB_DELETE /* Equal 2 lines above */
+#endif
 #include "csfx.h"
 
 /* Initialize is required for exception handling */
