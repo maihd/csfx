@@ -41,9 +41,12 @@ enum
 {
     CSFX_ERROR_NONE,
     CSFX_ERROR_ABORT,
-    CSFX_ERROR_ALIGN,
-    CSFX_ERROR_INSTR,
-    CSFX_ERROR_MEMORY,
+    CSFX_ERROR_ILLCODE,
+    CSFX_ERROR_SYSCALL,
+    CSFX_ERROR_MISALIGN,
+    CSFX_ERROR_SEGFAULT,
+    CSFX_ERROR_OUTBOUNDS,
+    CSFX_ERROR_STACKOVERFLOW,
 };
 
 /** 
@@ -96,11 +99,15 @@ __csfx__ void* csfx_script_symbol(csfx_script_t* script, const char* name);
  */
 __csfx__ const char* csfx_script_errmsg(csfx_script_t* script);
 
+#if defined(_WIN32)
+/* Undocumented, should not call by hand */
+__csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
+#endif
+
 #if defined(_MSC_VER)
 # define csfx_try(s)    __try
 # define csfx_except(s) __except(csfx__seh_filter(s, GetExceptionCode()))
 # define csfx_finally   __finally
-__csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
 #elif (__unix__)
 # include <signal.h>
 # include <setjmp.h>
@@ -110,9 +117,10 @@ __csfx__ int csfx__seh_filter(csfx_script_t* script, unsigned long code);
     if ((s)->errcode == CSFX_ERROR_NONE)
 
 # define csfx_except(s) else if (csfx__errcode_filter(s))
-# define csfx_finally   else
+# define csfx_finally   
 # define csfx__errcode_filter(s)					\
-    (s)->errcode > CSFX_ERROR_NONE && (s)->errcode <= CSFX_ERROR_MEMORY
+    (s)->errcode > CSFX_ERROR_NONE					\
+    && (s)->errcode <= CSFX_ERROR_STACKOVERFLOW
 
 extern __thread sigjmp_buf csfx__jmpenv;
 #else
@@ -124,9 +132,10 @@ extern __thread sigjmp_buf csfx__jmpenv;
     if ((s)->errcode == CSFX_ERROR_NONE)
 
 # define csfx_except(s) else if (csfx__errcode_filter(s))
-# define csfx_finally   else
+# define csfx_finally   
 # define csfx__errcode_filter(s)					\
-    (s)->errcode > CSFX_ERROR_NONE && (s)->errcode <= CSFX_ERROR_MEMORY
+    (s)->errcode > CSFX_ERROR_NONE					\
+    && (s)->errcode <= CSFX_ERROR_STACKOVERFLOW
 
 extern
 # if defined(__MINGW32__)
@@ -285,30 +294,30 @@ int csfx__seh_filter(csfx_script_t* script, unsigned long code)
     switch (code)
     {
     case EXCEPTION_ACCESS_VIOLATION:
-	errcode = CSFX_ERROR_MEMORY;
+	errcode = CSFX_ERROR_SEGFAULT;
 	break;
 	
     case EXCEPTION_ILLEGAL_INSTRUCTION:
-	errcode = CSFX_ERROR_INSTR;
+	errcode = CSFX_ERROR_ILLCODE;
 	break;
 	
     case EXCEPTION_DATATYPE_MISALIGNMENT:
-	errcode = CSFX_ERROR_ALIGN;
+	errcode = CSFX_ERROR_MISALIGN;
 	break;
 	
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
-	errcode = CSFX_ERROR_MEMORY;
+	errcode = CSFX_ERROR_OUTBOUNDS;
 	break;
 	
     case EXCEPTION_STACK_OVERFLOW:
-	errcode = CSFX_ERROR_MEMORY;
+	errcode = CSFX_ERROR_STACKOVERFLOW;
 	break;
 
     default:
 	break;
     }
 
-    script->errcode = errcode;
+    if (script) script->errcode = errcode;
     if (errcode == CSFX_ERROR_NONE)
     {
 	return EXCEPTION_CONTINUE_SEARCH;
@@ -544,71 +553,35 @@ __declspec(thread)
 #  endif
 jmp_buf csfx__jmpenv;
 
-static void csfx__sighandler(int code)
+static LONG WINAPI csfx__sighandler(EXCEPTION_POINTERS* info)
 {
-    int errcode;
-    switch (code)
-    {
-    case SIGILL:
-	errcode = CSFX_ERROR_INSTR;
-	break;
-
-	/*
-    case SIGBUS:
-	errcode = CSFX_ERROR_ALIGN;
-	break;
-	*/
-
-    case SIGABRT:
-	errcode = CSFX_ERROR_ABORT;
-	break;
-
-    case SIGSEGV:
-	errcode = CSFX_ERROR_MEMORY;
-	break;
-	
-    default:
-	errcode = CSFX_ERROR_NONE;
-	break;
-    }
+    int excode  = info->ExceptionRecord->ExceptionCode;
+    int errcode = csfx__seh_filter(NULL, excode);
     longjmp(csfx__jmpenv, errcode);
+    return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 int  csfx_init(void)
 {
-    int idx;
-    int signals[] = { SIGILL, SIGSEGV, SIGABRT };
-    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
-    {
-	if (signal(signals[idx], csfx__sighandler) != 0)
-	{
-	    return -1;
-	}
-    }
-
+    SetUnhandledExceptionFilter(csfx__sighandler);
     return 0;
 }
 
 void csfx_quit(void)
 {
-    int idx;
-    int signals[] = { SIGILL, SIGSEGV, SIGABRT };
-    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
-    {
-	if (signal(signals[idx], SIG_DFL) != 0)
-	{
-	    break;
-	}
-    }
+    SetUnhandledExceptionFilter(NULL);
 }
 # endif /* _MSC_VER */
 
 #elif defined(__unix__)
+# include <string.h>
 # include <sys/stat.h>
 # include <sys/types.h>
 # define CSFX__PATH_LENGTH PATH_MAX
+# define csfx__countof(x) (sizeof(x) / sizeof((x)[0]))
 
 __thread sigjmp_buf csfx__jmpenv;
+const int csfx__signals[] = { SIGBUS, SIGSYS, SIGILL, SIGSEGV, SIGABRT };
 
 static long csfx__last_modify_time(const char* path)
 {
@@ -646,11 +619,15 @@ static void csfx__sighandler(int code, siginfo_t* info, void* context)
     switch (code)
     {
     case SIGILL:
-	errcode = CSFX_ERROR_INSTR;
+	errcode = CSFX_ERROR_ILLCODE;
 	break;
 
     case SIGBUS:
-	errcode = CSFX_ERROR_ALIGN;
+	errcode = CSFX_ERROR_MISALIGN;
+	break;
+
+    case SIGSYS:
+	errcode = CSFX_ERROR_SYSCALL;
 	break;
 
     case SIGABRT:
@@ -658,7 +635,7 @@ static void csfx__sighandler(int code, siginfo_t* info, void* context)
 	break;
 
     case SIGSEGV:
-	errcode = CSFX_ERROR_MEMORY;
+	errcode = CSFX_ERROR_SEGFAULT;
 	break;
 	
     default:
@@ -673,15 +650,14 @@ int  csfx_init(void)
 {
     struct sigaction sa;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags     = SA_SIGINFO;
+    sa.sa_flags     = SA_SIGINFO | SA_RESTART | SA_NODEFER;
     sa.sa_handler   = NULL;
     sa.sa_sigaction = csfx__sighandler;
 
     int idx;
-    int signals[] = { SIGBUS, SIGILL, SIGSEGV, SIGABRT };
-    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
+    for (idx = 0; idx < csfx__countof(csfx__signals); idx++)
     {
-	if (sigaction(signals[idx], &sa, NULL) != 0)
+	if (sigaction(csfx__signals[idx], &sa, NULL) != 0)
 	{
 	    return -1;
 	}
@@ -692,17 +668,10 @@ int  csfx_init(void)
 
 void csfx_quit(void)
 {
-    struct sigaction sa;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags     = SA_NODEFER;
-    sa.sa_handler   = SIG_DFL;
-    sa.sa_sigaction = NULL;
-
     int idx;
-    int signals[] = { SIGBUS, SIGILL, SIGSEGV, SIGABRT };
-    for (idx = 0; idx < sizeof(signals) / sizeof(signals[0]); idx++)
+    for (idx = 0; idx < csfx__countof(csfx__signals); idx++)
     {
-	if (sigaction(signals[idx], &sa, NULL) != 0)
+	if (signal(csfx__signals[idx], SIG_DFL) != 0)
 	{
 	    break;
 	}
@@ -849,7 +818,6 @@ void csfx_script_free(csfx_script_t* script)
 	
 	/* Remove temp library */
 	csfx__remove_file(data->libtpath); /* Ignore error code */
-
 	
 #if defined(_MSC_VER) && defined(CSFX_PDB_DELETE)
 	csfx__copy_file(data->pdbtpath, data->pdbrpath);

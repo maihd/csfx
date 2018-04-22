@@ -207,7 +207,7 @@ void app_loginfo(const char* fmt, ...)
 void app_logerror(const char* fmt, ...)
 {
     char final_fmt[1024];
-
+    
     sprintf(final_fmt, "=> Error: %s\n", fmt);
 
     va_list ap;
