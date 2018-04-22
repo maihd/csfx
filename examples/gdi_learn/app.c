@@ -280,7 +280,7 @@ void app_update(csfx_script_t* script)
 	    app.on_paint = NULL;
 	    switch (script->errcode)
 	    {
-	    case CSFX_ERROR_MEMORY:
+	    case CSFX_ERROR_SEGFAULT:
 		app_logerror("Segment fault");
 		break;
 		
