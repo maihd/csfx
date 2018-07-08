@@ -4,3 +4,13 @@
 *.def
 *.exe
 *.DS_STORE
+
+/msvc_test/csfx_main/.vs
+/msvc_test/csfx_main/obj
+/msvc_test/csfx_main/Debug
+/msvc_test/csfx_main/Release
+
+/msvc_test/csfx_script/.vs
+/msvc_test/csfx_script/obj
+/msvc_test/csfx_script/Debug
+/msvc_test/csfx_script/Release
